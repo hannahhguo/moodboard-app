@@ -329,41 +329,76 @@ export default function Home() {
     }
   }
 
+  
+  // OPTIMISTIC ANALYZEPOEMANDSEARCH -> SKIP LLM IF IT'S SLOW
+  const ANALYZE_TIMEOUT_MS = 3500; // fallback fast if AI is slow
+
+  let currentRequest = 0; // ignore stale results
+
   async function analyzePoemAndSearch(poem: string) {
     setError(null);
     setLoading(true);
+    const myReq = ++currentRequest;
+
     try {
-      const resp = await fetch("/api/analyze", {
+      // 1) Optimistic: show *something* ASAP using the user text
+      setPage(1);
+      setItemsQueue([]);
+      setVisible([]);
+      const optimisticGot = await fetchImages(poem, 1, { append: false });
+
+      // 2) Kick off AI call with a timeout
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), ANALYZE_TIMEOUT_MS);
+
+      const aiResp = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: ac.signal,
         body: JSON.stringify({
           text: poem,
           acceptedTitles: kept.slice(0, 5).map(k => k.title).filter(Boolean),
         }),
+      }).catch((e) => {
+        // Aborted (timeout) or network error — keep optimistic results
+        return null;
       });
 
-      if (!resp.ok) {
-        const msg = (await resp.json().catch(() => ({}))).error || `Analyze API ${resp.status}`;
-        throw new Error(msg);
+      clearTimeout(t);
+
+      // If a newer request started, ignore this result
+      if (myReq !== currentRequest) return;
+
+      // 3) If AI didn’t respond in time, keep optimistic results
+      if (!aiResp || !aiResp.ok) {
+        setLoading(false);
+        return;
       }
 
-      const analysis = await resp.json();
-      const query = analysis.search_query?.trim() || activeQuery;
-      // Invisible: do NOT change userText
-      setActiveQuery(query);
+      const analysis = await aiResp.json();
+      const refined = analysis?.search_query?.trim();
 
-      // reset & search with refined query
-      setPage(1);
-      setItemsQueue([]);
-      setVisible([]);
-      await fetchImages(query, 1, { append: false });
+      // 4) If refined is usable, fetch refined results (invisibly)
+      if (refined && refined.length > 0) {
+        // Don’t nuke current results unless refined fetch succeeds
+        const got = await fetchImages(refined, 1, { append: false });
+        if (got > 0) {
+          setActiveQuery(refined);
+        } else if (optimisticGot === 0) {
+          // If we had nothing optimistic *and* refined got nothing, show a hint
+          setError("No matches found. Try broader words.");
+        }
+      }
+
     } catch (e: any) {
       console.error(e);
       setError(e?.message ?? "Analysis failed");
     } finally {
-      setLoading(false);
+      // Only clear loading if this is still the most recent request
+      if (myReq === currentRequest) setLoading(false);
     }
   }
+
 
   // UI bits
   const presets = useMemo(
