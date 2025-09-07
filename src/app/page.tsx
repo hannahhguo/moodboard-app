@@ -15,7 +15,127 @@ type Item = {
   source?: string;
 };
 
+// Toggle manual search UI without deleting code
+const ENABLE_MANUAL_SEARCH = false;
+
 const SLOT_COUNT = 3;
+
+// FOR WEB UI
+const PRESETS = [
+  "lonely, dark, single figure, horizon",
+  "warm nostalgic, golden hour, film grain",
+  "stormy sea, small boat, dramatic",
+  "urban night, neon, rain, solitude",
+];
+
+// FOR BETTER IMAGE QUERIES
+// --- Tiny lexicons (expand anytime) ---
+const COLOR_WORDS = new Set([
+  "black","white","gray","grey","charcoal","silver","gold","golden",
+  "blue","navy","indigo","teal","cyan","turquoise",
+  "red","crimson","scarlet","maroon",
+  "green","emerald","olive","sage",
+  "yellow","amber","ochre","ocher","mustard",
+  "purple","violet","magenta","lilac",
+  "orange","rust","copper","bronze",
+  "brown","beige","tan","sepia",
+  "pink","peach","rose",
+]);
+const MOOD_WORDS = new Set([
+  "lonely","solitary","melancholy","wistful","moody","somber","brooding",
+  "serene","calm","peaceful","tender","nostalgic","yearning","eerie","ominous",
+]);
+const PHOTO_COMPOSITION = new Set([
+  "silhouette","portrait","landscape","wide","aerial","macro","minimalist",
+  "grainy","film","bokeh","long-exposure","lowlight","low-light",
+  "horizon","skyline","shore","cliff","alley","street","night","dawn","dusk",
+  "rain","fog","mist","snow","storm","neon","reflections",
+]);
+
+// Stoplist + simple tokenization (same as before, slightly tweaked)
+const STOP = new Set([
+  "the","a","an","and","or","of","in","on","at","to","for","with","from","by","into","over",
+  "is","are","was","were","be","been","being","it","its","that","this","these","those","as",
+  "but","if","then","than","so","such","very","not","no","off","out","up","down","near","far",
+  "your","my","our","their","his","her","they","them","you","we","i"
+]);
+
+function tokenize(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s-]/gu, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+// Simple “noun/adjective-ish” heuristic: prefer longer words & certain suffixes.
+// This is intentionally cheap—no POS tagger needed.
+function posBias(word: string): number {
+  // adjective-y suffixes
+  if (/(ful|less|ous|ive|ish|y|ly)$/.test(word)) return 1.2;
+  // noun-y endings or compounds
+  if (/(tion|ment|ness|scape|graphy)$/.test(word)) return 1.15;
+  // hyphen compounds often meaningful (e.g., long-exposure, low-light)
+  if (word.includes("-")) return 1.1;
+  // length bias
+  if (word.length >= 7) return 1.05;
+  return 1.0;
+}
+
+// Domain biases: colors/moods/composition terms get a boost
+function domainBias(word: string): number {
+  let b = 1.0;
+  if (COLOR_WORDS.has(word)) b *= 1.25;
+  if (MOOD_WORDS.has(word)) b *= 1.2;
+  if (PHOTO_COMPOSITION.has(word)) b *= 1.15;
+  return b;
+}
+
+type WeightOpts = {
+  baseWeight?: number;   // weight for tokens from activeQuery
+  keptWeight?: number;   // weight for tokens from recent kept titles
+  itemWeight?: number;   // weight for tokens from the newly accepted image title
+};
+
+// Score tokens from a string with configurable weight and biases.
+function scoreTokensFrom(text: string, weight: number, scores: Record<string, number>) {
+  for (const w of tokenize(text)) {
+    if (STOP.has(w) || w.length < 3) continue;
+    const inc = weight * posBias(w) * domainBias(w);
+    scores[w] = (scores[w] ?? 0) + inc;
+  }
+}
+
+// Turn a score map into a compact query
+function topKeywords(scores: Record<string, number>, max = 12): string[] {
+  // Avoid near-duplicates by preferring unique roots (super simple de-dupe)
+  const entries = Object.entries(scores).sort((a,b) => b[1]-a[1]);
+  const picked: string[] = [];
+  const seenRoots = new Set<string>();
+  for (const [w] of entries) {
+    const root = w.replace(/(s|es|ed|ing|ly)$/,""); // ultra-naive stemming
+    if (seenRoots.has(root)) continue;
+    picked.push(w);
+    seenRoots.add(root);
+    if (picked.length >= max) break;
+  }
+  return picked;
+}
+
+// Pre-boost any color words found in the *user's* text
+function preseedColorHintsFromUserText(
+  scores: Record<string, number>,
+  text: string
+) {
+  for (const w of tokenize(text)) {
+    if (COLOR_WORDS.has(w)) {
+      // light nudge so color hints survive scoring
+      scores[w] = (scores[w] ?? 0) + 0.6;
+    }
+  }
+}
+
+
 
 export default function Home() {
   const [userText, setUserText] = useState("lonely, dark, single figure, horizon");
@@ -130,16 +250,39 @@ export default function Home() {
     setSeenIds(prev => new Set(prev).add(id));
   }
 
-  // Simple refinement: boost query with accepted item’s title + source
-  function refineQueryWith(item: Item) {
-    const tokens = new Set<string>();
-    // seed with the current activeQuery (not userText)
-    activeQuery.split(/[,\s]+/).forEach(w => w && tokens.add(w.toLowerCase()));
-    kept.slice(0, 5).forEach(k => (k.title || "").toLowerCase().split(/[,\s]+/).forEach(w => w && w.length > 2 && tokens.add(w)));
-    (item.title || "").toLowerCase().split(/[,\s]+/).forEach(w => w && w.length > 2 && tokens.add(w));
-    if (item.source) tokens.add(item.source.toLowerCase());
-    return Array.from(tokens).slice(0, 12).join(" ") || activeQuery;
+  // USING WEIGHTED KEYWORDS
+  // TODO: bump keptWeight if want to emphasise accumulated taste, bump itemWeight if want √ to steer harder
+  function refineQueryWith(item: Item): string {
+    const scores: Record<string, number> = {};
+
+    // pre-seed with color words from what the user typed in the Canvas
+    preseedColorHintsFromUserText(scores, userText);
+    
+    // Tweakable weights:
+    const WEIGHTS: WeightOpts = {
+      baseWeight: 1.0,   // current vibe
+      keptWeight: 1.4,   // reinforce what user kept
+      itemWeight: 1.8,   // strongly bias toward newly accepted image
+    };
+
+    // 1) current hidden vibe
+    scoreTokensFrom(activeQuery, WEIGHTS.baseWeight!, scores);
+
+    // 2) recent kept titles (up to 5)
+    for (const k of kept.slice(0, 5)) {
+      scoreTokensFrom(k.title ?? "", WEIGHTS.keptWeight!, scores);
+    }
+
+    // 3) newly accepted image (strongest)
+    scoreTokensFrom(item.title ?? "", WEIGHTS.itemWeight!, scores);
+
+    // Build the refined query (compact list of top tokens)
+    const keywords = topKeywords(scores, 12);
+    const refined = keywords.join(" ");
+
+    return refined || activeQuery;
   }
+
 
 
   async function handleAccept(idx: number) {
@@ -350,22 +493,25 @@ export default function Home() {
             />
 
             <div className="mt-3 flex items-center gap-2">
-              <button
-                onClick={() => {
-                  // reset flow for a fresh search
-                  setActiveQuery(userText);
-                  setPage(1);
-                  setItemsQueue([]);
-                  setVisible([]);
-                  setKept([]);
-                  setSeenIds(new Set());
-                  fetchImages(userText, 1, { append: false });
-                }}
-                disabled={loading}
-                className="rounded-xl bg-black px-4 py-2 text-white"
-              >
-                Search
-              </button>
+              {/* search hidden for now */}
+              {ENABLE_MANUAL_SEARCH && (
+                <button
+                  onClick={() => {
+                    // reset flow for a fresh search
+                    setActiveQuery(userText);
+                    setPage(1);
+                    setItemsQueue([]);
+                    setVisible([]);
+                    setKept([]);
+                    setSeenIds(new Set());
+                    fetchImages(userText, 1, { append: false });
+                  }}
+                  disabled={loading}
+                  className="rounded-xl bg-black px-4 py-2 text-white"
+                >
+                  Search
+                </button>
+              )}
 
               <button
                 onClick={() => analyzePoemAndSearch(userText)}
@@ -377,15 +523,11 @@ export default function Home() {
 
               <button
                 onClick={() => {
-                  // user explicitly wants to search their typed text
-                  setActiveQuery(userText);
-                  setPage(1);
-                  setItemsQueue([]);
-                  setVisible([]);
-                  setKept([]);
-                  setSeenIds(new Set());
-                  fetchImages(userText, 1, { append: false });
+                  const p = PRESETS[Math.floor(Math.random() * PRESETS.length)];
+                  setUserText(p);              // show it in the Canvas
+                  analyzePoemAndSearch(p);     // AI path (does its own resets + fetch)
                 }}
+                disabled={loading}
                 className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
               >
                 Try a demo
@@ -397,25 +539,18 @@ export default function Home() {
                 Presets
               </p>
               <div className="flex flex-wrap gap-2">
-                {["lonely, dark, single figure, horizon", "warm nostalgic, golden hour, film grain", "stormy sea, small boat, dramatic"].map(
-                  (p) => (
-                    <button
-                      key={p}
-                      onClick={() => {
-                        const demo = "urban night, neon, rain, solitude";
-                        setUserText(demo);
-                        setActiveQuery(demo);
-                        setPage(1);
-                        setItemsQueue([]);
-                        setVisible([]);
-                        setKept([]);
-                        setSeenIds(new Set());
-                        fetchImages(demo, 1, { append: false });
-                      }}
-                      className="rounded-full border px-3 py-1 text-xs hover:bg-gray-50"
-                    >
-                      {p}
-                    </button>
+                {PRESETS.map((p) => (
+                  <button
+                    key={p}
+                    onClick={() => {
+                      setUserText(p);          // update Canvas text only
+                      analyzePoemAndSearch(p); // AI path (no manual resets needed)
+                    }}
+                    disabled={loading}
+                    className="rounded-full border px-3 py-1 text-xs hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    {p}
+                  </button>
                   )
                 )}
               </div>
