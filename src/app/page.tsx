@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
+import { motion } from "framer-motion";
 
 type Item = {
   id: string;
@@ -513,39 +514,7 @@ export default function Home() {
           </div>
 
           {/* Kept images grid */}
-          {kept.length > 0 && (
-            <>
-              <h2 className="mt-8 text-lg font-medium">Kept on Board</h2>
-              <div className="mt-3 grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-4">
-                {kept.map((it) => (
-                  <figure key={it.id} className="overflow-hidden rounded-2xl border">
-                    <Image
-                      src={it.thumb}
-                      alt={it.title}
-                      width={400}
-                      height={300}
-                      className="h-48 w-full object-cover"
-                    />
-                    <figcaption className="p-3 text-sm">
-                      <div className="line-clamp-1">{it.title || "Untitled"}</div>
-                      <div className="mt-1 text-xs opacity-70">
-                        by{" "}
-                        {it.creator_url ? (
-                          <a className="underline" href={it.creator_url} target="_blank">
-                            {it.creator}
-                          </a>
-                        ) : (
-                          it.creator
-                        )}{" "}
-                        · {it.license.toUpperCase()}
-                        {it.license_version ? ` ${it.license_version}` : ""} · {it.source}
-                      </div>
-                    </figcaption>
-                  </figure>
-                ))}
-              </div>
-            </>
-          )}
+          {kept.length > 0 && <CollageBoard items={kept} />}
         </section>
 
         {/* Canvas (right) */}
@@ -634,5 +603,119 @@ export default function Home() {
         </aside>
       </div>
     </main>
+  );
+}
+
+// FOR COLLAGE
+type CollageProps = { items: Item[] };
+
+// tiny deterministic hash → stable “randomness”
+function hashTo01(s: string) {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0) / 2 ** 32; // 0..1
+}
+
+const lerp = (t: number, a: number, b: number) => a + t * (b - a);
+
+/**
+ * CollageBoard — overlapping “polaroid” cards with gentle rotation & drag
+ * Usage: {kept.length > 0 && <CollageBoard items={kept} />}
+ */
+export function CollageBoard({ items }: CollageProps) {
+  // Tune these to taste
+  const W = 760;          // canvas width (px) on desktop
+  const H = 520;          // canvas height (px)
+  const CARD_W = 210;     // each card width (px)
+  const CARD_H = 150;     // each card height (px)
+  const ROT_RANGE = 7;    // ± degrees
+
+  // Drag stays inside the canvas
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+
+  return (
+    <div className="mt-8">
+      <h2 className="text-lg font-medium mb-3">Kept on Board</h2>
+
+      <div className="relative w-full overflow-visible">
+        {/* Collage canvas */}
+        <div
+          ref={canvasRef}
+          className="relative mx-auto rounded-2xl border bg-white/70 shadow-sm"
+          style={{
+            width: "min(100%, 780px)", // responsive wrapper
+            height: H,
+            backgroundImage: "radial-gradient(rgba(0,0,0,0.04) 1px, transparent 0)",
+            backgroundSize: "16px 16px",
+          }}
+        >
+          {/* Inner fixed-width layer so absolute coords feel consistent */}
+          <div
+            className="absolute inset-0 mx-auto"
+            style={{ width: Math.min(W, 780), height: H }}
+          >
+            {items.map((it, i) => {
+              // stable pseudo-randoms per card
+              const r1 = hashTo01(it.id + "_x");
+              const r2 = hashTo01(it.id + "_y");
+              const r3 = hashTo01(it.id + "_rot");
+              const r4 = hashTo01(it.id + "_z");
+
+              // positions with slight overlaps (leave 10–20px gutters)
+              const x = lerp(r1, -10, Math.max(0, W - CARD_W - 20));
+              const y = lerp(r2, 0, Math.max(0, H - CARD_H - 20));
+              const rot = lerp(r3, -ROT_RANGE, ROT_RANGE);
+              const z = Math.floor(lerp(r4, 1, 80));
+
+              return (
+                <motion.figure
+                  key={it.id}
+                  className="absolute rounded-xl border bg-white shadow-md overflow-hidden will-change-transform"
+                  style={{
+                    width: CARD_W,
+                    height: CARD_H,
+                    left: x,
+                    top: y,
+                    zIndex: z,
+                  }}
+                  initial={{ opacity: 0, rotate: rot - 3, scale: 0.98 }}
+                  animate={{ opacity: 1, rotate: rot, scale: 1 }}
+                  whileHover={{ scale: 1.04, rotate: rot + 1, zIndex: 999 }}
+                  transition={{ type: "spring", stiffness: 220, damping: 22 }}
+
+                  // Drag inside the canvas
+                  drag
+                  dragMomentum={false}
+                  dragElastic={0.08}
+                  dragConstraints={canvasRef}
+                >
+                  <div className="relative w-full h-full">
+                    <Image
+                      src={it.thumb}
+                      alt={it.title || "image"}
+                      fill
+                      sizes={`${CARD_W}px`}
+                      className="object-cover"
+                      priority={i < 6}
+                    />
+                    <figcaption className="absolute inset-x-0 bottom-0 bg-black/45 text-white text-[11px] px-2 py-1 line-clamp-1">
+                      {(it.title || "Untitled") + (it.creator ? ` — ${it.creator}` : "")}
+                    </figcaption>
+                  </div>
+                </motion.figure>
+              );
+            })}
+          </div>
+        </div>
+
+        <p className="mt-2 text-xs opacity-60">
+          Tip: hover to bring an image to the front; drag to rearrange. Tweak{" "}
+          <code>CARD_W</code>, <code>CARD_H</code>, and <code>ROT_RANGE</code> for vibe.
+        </p>
+      </div>
+    </div>
   );
 }
