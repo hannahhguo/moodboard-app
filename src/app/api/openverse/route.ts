@@ -3,6 +3,21 @@ import { NextResponse } from "next/server";
 // Use the current API domain
 const OPENVERSE = "https://api.openverse.org/v1/images";
 
+// FOR TYPESCRIPT STRICT TYPECHECKING
+interface OpenverseItem {
+  id?: string;
+  title?: string;
+  thumbnail?: string;
+  url?: string;
+  creator?: string;
+  creator_url?: string;
+  foreign_landing_url?: string;
+  license?: string;
+  license_version?: string;
+  provider?: string;
+}
+
+
 // If Edge seems flaky for you, switch to Node by uncommenting the next line:
 // export const runtime = "nodejs";
 export const runtime = "edge";
@@ -87,17 +102,36 @@ export async function GET(req: Request) {
   }
 
   const data = await r.json();
-  const items = (data?.results ?? []).map((it: any) => ({
-    id: it.id,
-    title: it.title ?? "Untitled",
-    thumb: it.thumbnail ?? it.url,
-    full: it.url,
-    creator: it.creator ?? "Unknown",
-    creator_url: it.creator_url ?? it.foreign_landing_url,
-    license: it.license,
-    license_version: it.license_version,
-    source: it.provider,
-  }));
+
+  // Normalize safely
+  const raw = Array.isArray(data?.results) ? data.results as OpenverseItem[] : [];
+  const mapped = raw.map((it: any) => {
+    const thumb = it?.thumbnail ?? it?.url ?? "";
+    const full  = it?.url ?? "";
+    return {
+        id: it?.id,
+        title: it?.title ?? "Untitled",
+        thumb,
+        full,
+        creator: it?.creator ?? "Unknown",
+        creator_url: it?.creator_url ?? it?.foreign_landing_url,
+        license: it?.license,
+        license_version: it?.license_version,
+        source: it?.provider,
+    };
+  });
+
+  // Filter out items that would crash <Image /> (no valid http(s) thumb or no id)
+  const items = mapped.filter((item) =>
+        typeof item.id === "string" &&
+        typeof item.thumb === "string" &&
+        /^https?:\/\//i.test(item.thumb)
+    );
+
+  // (Optional) de-dup by id
+  // const seen = new Set<string>();
+  // const items = filtered.filter(m => !seen.has(m.id) && seen.add(m.id));
 
   return NextResponse.json({ items });
+
 }

@@ -147,13 +147,14 @@ export default function Home() {
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const seenIdsRef = useRef<Set<string>>(new Set());
 
   // Prevent overlapping fetches
   const fetchingRef = useRef(false);
 
   // ---- Fetch helpers ----
-  async function fetchImages(query: string, pageNum: number, opts?: { append?: boolean }) {
-    if (fetchingRef.current) return;
+  async function fetchImages(query: string, pageNum: number, opts?: { append?: boolean }): Promise<number>  {
+    if (fetchingRef.current) {return 0;}
     fetchingRef.current = true;
     try {
       setLoading(true);
@@ -180,32 +181,62 @@ export default function Home() {
 
       const j = await r.json();
 
-
       // Filter out anything we've already shown/rejected/kept
-      const fresh: Item[] = (j.items ?? []).filter((it: Item) => !seenIds.has(it.id));
+      const fresh: Item[] = (j.items ?? []).filter((it: Item) => !seenIdsRef.current.has(it.id));
 
-      setItemsQueue(prev => (opts?.append ? [...prev, ...fresh] : fresh));
+      // making sure no duplicate images in the same queue
+      setItemsQueue(prev => {
+        const existing = new Set(prev.map(x => x.id));
+        const incoming = fresh.filter(it => !existing.has(it.id));
+        return opts?.append ? [...prev, ...incoming] : incoming;
+      });
+
+      return fresh.length;
     } catch (e: any) {
       console.error(e);
       setError(e?.message ?? "Search failed");
+      return 0;
     } finally {
       setLoading(false);
       fetchingRef.current = false;
     }
   }
 
-  // Fill visible slots up to SLOT_COUNT from the queue
+  // Fill visible slots up to SLOT_COUNT from the queue, but not things seen already
   function fillSlots() {
-    setVisible(prev => {
-      let next = [...prev];
-      let qcopy = [...itemsQueue];
-      while (next.length < SLOT_COUNT && qcopy.length > 0) {
-        next.push(qcopy.shift() as Item);
-      }
-      // commit the queue change
-      if (qcopy.length !== itemsQueue.length) setItemsQueue(qcopy);
-      return next;
-    });
+    // Fast exits prevent unnecessary state writes
+    if (visible.length >= SLOT_COUNT) return;
+    if (itemsQueue.length === 0) return;
+
+    const nextVisible = [...visible];
+    const nextQueue = [...itemsQueue];
+
+    const onScreen = new Set(nextVisible.map(x => x.id));
+    const newlyShown: string[] = [];
+
+    while (nextVisible.length < SLOT_COUNT && nextQueue.length > 0) {
+      const candidate = nextQueue.shift() as Item;
+
+      // skip if already on screen or already seen
+      if (onScreen.has(candidate.id) || seenIdsRef.current.has(candidate.id)) continue;
+
+      nextVisible.push(candidate);
+      onScreen.add(candidate.id);
+      newlyShown.push(candidate.id);
+    }
+
+    // If we didn't actually move anything, do nothing (avoid re-render loop)
+    if (newlyShown.length === 0) return;
+
+    // Mark newly displayed as seen (sync both ref and state)
+    const updatedSeen = new Set(seenIdsRef.current);
+    for (const id of newlyShown) updatedSeen.add(id);
+    seenIdsRef.current = updatedSeen;
+    setSeenIds(updatedSeen);
+
+    // Commit state updates (only when changed)
+    setVisible(nextVisible);
+    setItemsQueue(nextQueue);
   }
 
   // Kick off initial load
@@ -223,9 +254,11 @@ export default function Home() {
 
   // Whenever queue changes, try to top up the 3 visible slots
   useEffect(() => {
-    if (visible.length < SLOT_COUNT) fillSlots();
+    if (visible.length < SLOT_COUNT && itemsQueue.length > 0) {
+      fillSlots();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [itemsQueue]);
+  }, [itemsQueue, visible.length]);
 
   // If we’re running low on queue, prefetch next page --commented out to prevent over-fetching
   // useEffect(() => {
@@ -247,7 +280,12 @@ export default function Home() {
   }
 
   function markSeen(id: string) {
-    setSeenIds(prev => new Set(prev).add(id));
+    setSeenIds(prev => {
+      const next = new Set(prev);
+      next.add(id);
+      seenIdsRef.current = next;   // keep ref in sync
+      return next;
+    });
   }
 
   // USING WEIGHTED KEYWORDS
@@ -333,12 +371,12 @@ export default function Home() {
   // OPTIMISTIC ANALYZEPOEMANDSEARCH -> SKIP LLM IF IT'S SLOW
   const ANALYZE_TIMEOUT_MS = 3500; // fallback fast if AI is slow
 
-  let currentRequest = 0; // ignore stale results
+  const currentRequestRef = useRef(0); // ignore stale results
 
   async function analyzePoemAndSearch(poem: string) {
     setError(null);
     setLoading(true);
-    const myReq = ++currentRequest;
+    const myReq = ++currentRequestRef.current;
 
     try {
       // 1) Optimistic: show *something* ASAP using the user text
@@ -367,7 +405,7 @@ export default function Home() {
       clearTimeout(t);
 
       // If a newer request started, ignore this result
-      if (myReq !== currentRequest) return;
+      if (myReq !== currentRequestRef.current) return;
 
       // 3) If AI didn’t respond in time, keep optimistic results
       if (!aiResp || !aiResp.ok) {
@@ -382,6 +420,8 @@ export default function Home() {
       if (refined && refined.length > 0) {
         // Don’t nuke current results unless refined fetch succeeds
         const got = await fetchImages(refined, 1, { append: false });
+        if (myReq !== currentRequestRef.current) return; // guard again
+        
         if (got > 0) {
           setActiveQuery(refined);
         } else if (optimisticGot === 0) {
@@ -395,7 +435,7 @@ export default function Home() {
       setError(e?.message ?? "Analysis failed");
     } finally {
       // Only clear loading if this is still the most recent request
-      if (myReq === currentRequest) setLoading(false);
+      if (myReq === currentRequestRef.current) setLoading(false);
     }
   }
 
