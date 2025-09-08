@@ -1,137 +1,83 @@
-import { NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 
-// Use the current API domain
-const OPENVERSE = "https://api.openverse.org/v1/images";
-
-// FOR TYPESCRIPT STRICT TYPECHECKING
-interface OpenverseItem {
-  id?: string;
+type OpenverseItem = {
+  id: string;
   title?: string;
-  thumbnail?: string;
-  url?: string;
+  thumbnail?: string; // Openverse `thumbnail`
+  url: string;        // full image url
   creator?: string;
   creator_url?: string;
-  foreign_landing_url?: string;
   license?: string;
   license_version?: string;
-  provider?: string;
+  source?: string;
+};
+
+type OpenverseResponse = {
+  results: unknown[];
+};
+
+function toItem(x: unknown): OpenverseItem | null {
+  if (!x || typeof x !== "object") return null;
+  const o = x as Record<string, unknown>;
+  if (typeof o.id !== "string") return null;
+
+  return {
+    id: o.id,
+    title: typeof o.title === "string" ? o.title : undefined,
+    thumbnail: typeof o.thumbnail === "string" ? o.thumbnail : undefined,
+    url: typeof o.url === "string" ? o.url : "",
+    creator: typeof o.creator === "string" ? o.creator : "",
+    creator_url: typeof o.creator_url === "string" ? o.creator_url : undefined,
+    license: typeof o.license === "string" ? o.license : "",
+    license_version:
+      typeof o.license_version === "string" ? o.license_version : undefined,
+    source: typeof o.source === "string" ? o.source : undefined,
+  };
 }
 
-
-// If Edge seems flaky for you, switch to Node by uncommenting the next line:
-// export const runtime = "nodejs";
-export const runtime = "edge";
-export const dynamic = "force-dynamic";
-
-// Small helper: timeout + gentle retry for 5xx (NOT for 429)
-async function fetchWithRetry(url: string, opts: RequestInit, tries = 2): Promise<Response> {
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 8000); // 8s timeout
+export async function GET(req: NextRequest) {
   try {
-    const r = await fetch(url, { ...opts, signal: ac.signal });
+    const { searchParams } = new URL(req.url);
+    const q = searchParams.get("q") ?? "";
+    const page = Number(searchParams.get("page") ?? "1");
 
-    // If rate limited, DO NOT retry (return immediately so client can cool down)
-    if (r.status === 429) return r;
+    // Build the Openverse API URL
+    const apiUrl = `https://api.openverse.org/v1/images/?q=${encodeURIComponent(
+      q
+    )}&page=${page}`;
 
-    // Retry once on transient 5xx
-    if (r.status >= 500 && r.status < 600 && tries > 1) {
-      await new Promise(res => setTimeout(res, 700));
-      return fetchWithRetry(url, opts, tries - 1);
+    const res = await fetch(apiUrl, { cache: "no-store" });
+    if (!res.ok) {
+      return new Response(JSON.stringify({ error: `Openverse ${res.status}` }), {
+        status: res.status,
+        headers: { "content-type": "application/json" },
+      });
     }
-    return r;
-  } finally {
-    clearTimeout(timer);
+
+    const j = (await res.json()) as OpenverseResponse;
+    const items = Array.isArray(j.results)
+      ? j.results.map(toItem).filter(Boolean)
+      : [];
+
+    // Map Openverse items into your frontend Item shape
+    const mapped = (items as OpenverseItem[]).map((r) => ({
+      id: r.id,
+      title: r.title ?? "",
+      thumb: r.thumbnail ?? r.url,
+      full: r.url,
+      creator: r.creator ?? "",
+      creator_url: r.creator_url,
+      license: r.license ?? "",
+      license_version: r.license_version,
+      source: r.source,
+    }));
+
+    return Response.json({ items: mapped });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return new Response(JSON.stringify({ error: message }), {
+      status: 500,
+      headers: { "content-type": "application/json" },
+    });
   }
-}
-
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-
-  // Required / common params
-  const q = searchParams.get("q") ?? "lonely horizon";
-  const page = searchParams.get("page") ?? "1";
-
-  // Flexible license handling
-  const license = searchParams.get("license") || "";
-  const license_type = searchParams.get("license_type") || "all-cc";
-
-  // Optional passthroughs
-  const color = searchParams.get("color") || "";
-  const source = searchParams.get("source") || "";
-
-  const u = new URL(OPENVERSE);
-  u.searchParams.set("q", q);
-  u.searchParams.set("page", page);
-  // Fewer requests → ask for more items per call (fallback if not honored)
-  u.searchParams.set("page_size", "20");
-
-  if (license) u.searchParams.set("license", license);
-  else if (license_type) u.searchParams.set("license_type", license_type);
-  if (color) u.searchParams.set("color", color);
-  if (source) u.searchParams.set("source", source);
-
-  const r = await fetchWithRetry(u.toString(), {
-    headers: { "User-Agent": "MoodBoard/1.0 (contact: you@example.com)" },
-    cache: "no-store",
-  });
-
-  // Handle rate limit explicitly (shows cooldown to the client)
-  if (r.status === 429) {
-    const retryAfter = Number(r.headers.get("retry-after") ?? "60");
-    const details = await r.text().catch(() => "");
-    return NextResponse.json(
-      { error: "Rate limited", retry_after: retryAfter, details: details.slice(0, 300) },
-      { status: 429 }
-    );
-  }
-
-  if (r.status === 401 || r.status === 403) {
-    const details = await r.text().catch(() => "");
-    return NextResponse.json(
-        { error: "Unauthorized/Forbidden", details: details.slice(0, 300) },
-        { status: r.status }
-    );
-  }   
-
-  if (!r.ok) {
-    const text = await r.text().catch(() => "");
-    return NextResponse.json(
-      { error: `Upstream ${r.status}`, details: text.slice(0, 300) },
-      { status: 502 }
-    );
-  }
-
-  const data = await r.json();
-
-  // Normalize safely
-  const raw = Array.isArray(data?.results) ? data.results as OpenverseItem[] : [];
-  const mapped = raw.map((it: any) => {
-    const thumb = it?.thumbnail ?? it?.url ?? "";
-    const full  = it?.url ?? "";
-    return {
-        id: it?.id,
-        title: it?.title ?? "Untitled",
-        thumb,
-        full,
-        creator: it?.creator ?? "Unknown",
-        creator_url: it?.creator_url ?? it?.foreign_landing_url,
-        license: it?.license,
-        license_version: it?.license_version,
-        source: it?.provider,
-    };
-  });
-
-  // Filter out items that would crash <Image /> (no valid http(s) thumb or no id)
-  const items = mapped.filter((item) =>
-        typeof item.id === "string" &&
-        typeof item.thumb === "string" &&
-        /^https?:\/\//i.test(item.thumb)
-    );
-
-  // (Optional) de-dup by id
-  // const seen = new Set<string>();
-  // const items = filtered.filter(m => !seen.has(m.id) && seen.add(m.id));
-
-  return NextResponse.json({ items });
-
 }

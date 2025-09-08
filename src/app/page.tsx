@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { motion } from "framer-motion";
 import Brand from "@/components/Brand";
@@ -143,7 +143,7 @@ export default function Page() {
   const [itemsQueue, setItemsQueue] = useState<Item[]>([]);
   const [visible, setVisible] = useState<Item[]>([]);
   const [kept, setKept] = useState<Item[]>([]);
-  const [seenIds, setSeenIds] = useState<Set<string>>(new Set());
+  const [, setSeenIds] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -192,9 +192,10 @@ export default function Page() {
       });
 
       return fresh.length;
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(e);
-      setError(e?.message ?? "Search failed");
+      const msg = e instanceof Error ? e.message : "Search failed";
+      setError(msg);
       return 0;
     } finally {
       setLoading(false);
@@ -248,7 +249,6 @@ export default function Page() {
     setKept([]);
     setSeenIds(new Set());
     // no fetch here — wait for Analyze or a preset click
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Whenever queue changes, try to top up the 3 visible slots
@@ -396,8 +396,7 @@ export default function Page() {
           text: poem,
           acceptedTitles: kept.slice(0, 5).map(k => k.title).filter(Boolean),
         }),
-      }).catch((e) => {
-        // Aborted (timeout) or network error — keep optimistic results
+      }).catch(() => {
         return null;
       });
 
@@ -429,9 +428,10 @@ export default function Page() {
         }
       }
 
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(e);
-      setError(e?.message ?? "Analysis failed");
+      const msg = e instanceof Error ? e.message : "Analysis failed";
+      setError(msg);
     } finally {
       // Only clear loading if this is still the most recent request
       if (myReq === currentRequestRef.current) setLoading(false);
@@ -440,16 +440,6 @@ export default function Page() {
 
 
   // UI bits
-  const presets = useMemo(
-    () => [
-      "lonely, dark, single figure, horizon",
-      "urban night, neon, rain, solitude",
-      "stormy sea, small boat, dramatic",
-      "warm nostalgic, golden hour, film grain",
-    ],
-    []
-  );
-
   return (
     <main className="mx-auto max-w-7xl p-6">
 
@@ -629,7 +619,7 @@ const lerp = (t: number, a: number, b: number) => a + t * (b - a);
  * CollageBoard — overlapping “polaroid” cards with gentle rotation & drag
  * Usage: {kept.length > 0 && <CollageBoard items={kept} />}
  */
-export function CollageBoard({ items }: CollageProps) {
+function CollageBoard({ items }: CollageProps) {
   // Tune these to taste
   const W = 760;          // canvas width (px) on desktop
   const H = 520;          // canvas height (px)
