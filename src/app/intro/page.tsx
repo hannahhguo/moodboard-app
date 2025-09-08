@@ -7,10 +7,9 @@ export default function IntroPage() {
   const router = useRouter();
 
   function start() {
-    // remember they've seen the intro for 1 year
-    document.cookie = `intro=1; Path=/; Max-Age=31536000; SameSite=Lax`;
-    router.push("/");
+    router.replace("/?skipIntro=1");
   }
+
 
   return (
     <main className="mx-auto flex min-h-screen max-w-4xl flex-col items-center justify-center p-8 text-center">
@@ -20,7 +19,7 @@ export default function IntroPage() {
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4 }}
       >
-        AI Mood Board for Songwriters
+        Prism: An AI-curated Mood Board for Artists
       </motion.h1>
 
       <motion.p
@@ -29,7 +28,8 @@ export default function IntroPage() {
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.1, duration: 0.4 }}
       >
-        Describe a feeling or lyric, then curate images that match your vibe.
+        Describe a feeling and use the canvas as your scratchpad for poetry and lyrics. 
+        Then, curate images that match your vibe to further inspire. 
         We learn from what you keep to refine future suggestions.
       </motion.p>
 

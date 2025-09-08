@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { motion } from "framer-motion";
+import Brand from "@/components/Brand";
 
 type Item = {
   id: string;
@@ -136,10 +137,8 @@ function preseedColorHintsFromUserText(
   }
 }
 
-
-
-export default function Home() {
-  const [userText, setUserText] = useState("lonely, dark, single figure, horizon");
+export default function Page() {
+  const [userText, setUserText] = useState("");
   const [activeQuery, setActiveQuery] = useState(userText); // invisible internal query for refinement
   const [itemsQueue, setItemsQueue] = useState<Item[]>([]);
   const [visible, setVisible] = useState<Item[]>([]);
@@ -242,16 +241,15 @@ export default function Home() {
 
   // Kick off initial load
   useEffect(() => {
-    (async () => {
-      setPage(1);
-      setItemsQueue([]);
-      setVisible([]);
-      setKept([]);
-      setSeenIds(new Set());
-      await fetchImages(activeQuery, 1, { append: false });
-    })();
+    // Reset clean state on first mount, but DO NOT auto-fetch
+    setPage(1);
+    setItemsQueue([]);
+    setVisible([]);
+    setKept([]);
+    setSeenIds(new Set());
+    // no fetch here — wait for Analyze or a preset click
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // changes if you setQ manually; initial effect runs once
+  }, []);
 
   // Whenever queue changes, try to top up the 3 visible slots
   useEffect(() => {
@@ -454,6 +452,12 @@ export default function Home() {
 
   return (
     <main className="mx-auto max-w-7xl p-6">
+
+      {/* === Prism header added here === */}
+      <header className="mb-6 flex items-center justify-between">
+        <Brand />
+      </header>
+      
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* Mood Board (left) */}
         <section className="lg:col-span-8">
@@ -629,8 +633,8 @@ export function CollageBoard({ items }: CollageProps) {
   // Tune these to taste
   const W = 760;          // canvas width (px) on desktop
   const H = 520;          // canvas height (px)
-  const CARD_W = 210;     // each card width (px)
-  const CARD_H = 150;     // each card height (px)
+  const CARD_W = 310;     // each card width (px)
+  const CARD_H = 250;     // each card height (px)
   const ROT_RANGE = 7;    // ± degrees
 
   // Drag stays inside the canvas
